@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, animate, PanInfo } from 'motion/react';
 
 interface WheelPickerProps {
@@ -12,36 +12,73 @@ const VISIBLE_ITEMS = 5;
 const DAMPING_RATIO = 1.2;
 const VELOCITY_THRESHOLD = 0.5;
 const FRICTION = 0.95;
+const VIRTUAL_ITEMS_MULTIPLIER = 100; // 虚拟项目倍数，用于创建无限滚动效果
 
 export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPickerProps) {
-  const [selectedIndex, setSelectedIndex] = useState(defaultIndex);
+  const [virtualOffset, setVirtualOffset] = useState(0); // 虚拟偏移量
   const [isSnapping, setIsSnapping] = useState(false);
-  const [translateY, setTranslateY] = useState(0);
-  const isDraggingRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
   const velocityRef = useRef(0);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number|null>(null);
   const animationRef = useRef<any>(null);
   const lastWheelTimeRef = useRef(0);
 
-  const centerOffset = Math.floor(VISIBLE_ITEMS / 2) * ITEM_HEIGHT;
+  // 计算总虚拟项目数
+  const totalVirtualItems = items.length * VIRTUAL_ITEMS_MULTIPLIER;
+  
+  // 计算中间位置，用于初始定位
+  const middleOffset = useMemo(() => {
+    const middleVirtualIndex = Math.floor(totalVirtualItems / 2);
+    return -middleVirtualIndex * ITEM_HEIGHT;
+  }, [totalVirtualItems]);
 
+  // 初始化位置
   useEffect(() => {
-    const initialY = -defaultIndex * ITEM_HEIGHT;
-    setTranslateY(initialY);
-  }, []);
+    const initialVirtualIndex = Math.floor(totalVirtualItems / 2) + defaultIndex;
+    setVirtualOffset(-initialVirtualIndex * ITEM_HEIGHT);
+  }, [defaultIndex, totalVirtualItems]);
 
-  const constrainY = (value: number) => {
-    const minY = -(items.length - 1) * ITEM_HEIGHT;
-    const maxY = 0;
-    return Math.max(minY, Math.min(maxY, value));
+  // 计算当前实际索引（通过取模实现循环）
+  const selectedIndex = useMemo(() => {
+    const virtualIndex = Math.round(-virtualOffset / ITEM_HEIGHT);
+    // 使用取模运算实现循环
+    return ((virtualIndex % items.length) + items.length) % items.length;
+  }, [virtualOffset, items.length]);
+
+  // 生成虚拟项目列表（只渲染可见部分）
+  const visibleItems = useMemo(() => {
+  const startVirtualIndex = Math.floor(-virtualOffset / ITEM_HEIGHT) - Math.floor(VISIBLE_ITEMS / 2);
+  const itemsToShow: Array<{
+    virtualIndex: number;
+    actualIndex: number;
+    label: string;
+    position: number;
+  }> = [];
+
+  for (let i = 0; i < VISIBLE_ITEMS * 3; i++) {
+    const virtualIndex = startVirtualIndex + i;
+    const actualIndex = ((virtualIndex % items.length) + items.length) % items.length;
+    itemsToShow.push({
+      virtualIndex,
+      actualIndex,
+      label: items[actualIndex],
+      position: virtualIndex * ITEM_HEIGHT,
+    });
+  }
+
+  return itemsToShow;
+}, [virtualOffset, items]);
+
+  const constrainVirtualOffset = (value: number) => {
+    // 这里不需要限制边界，因为我们要实现无限滚动
+    return value;
   };
 
-  const getClosestIndex = (yValue: number) => {
-    const index = Math.round(-yValue / ITEM_HEIGHT);
-    return Math.max(0, Math.min(items.length - 1, index));
+  const getClosestVirtualIndex = (currentOffset: number) => {
+    return Math.round(-currentOffset / ITEM_HEIGHT);
   };
 
-  const snapToClosest = (currentY: number, velocity = 0) => {
+  const snapToClosest = (currentOffset: number, velocity = 0) => {
     if (animationRef.current) {
       animationRef.current.stop();
     }
@@ -49,53 +86,55 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
       cancelAnimationFrame(animationFrameRef.current);
     }
 
-    const targetIndex = getClosestIndex(currentY);
-    const targetY = -targetIndex * ITEM_HEIGHT;
+    const targetVirtualIndex = getClosestVirtualIndex(currentOffset);
+    const targetOffset = -targetVirtualIndex * ITEM_HEIGHT;
 
     setIsSnapping(true);
-    onSnapComplete?.(targetIndex, false);
+    const actualIndex = ((targetVirtualIndex % items.length) + items.length) % items.length;
+    onSnapComplete?.(actualIndex, false);
 
-    animationRef.current = animate(currentY, targetY, {
+    animationRef.current = animate(currentOffset, targetOffset, {
       type: 'spring',
       stiffness: 300,
       damping: 30,
       velocity,
       onUpdate: (v) => {
-        setTranslateY(v);
+        setVirtualOffset(v);
       },
       onComplete: () => {
-        setSelectedIndex(targetIndex);
         setIsSnapping(false);
-        onSnapComplete?.(targetIndex, true);
+        onSnapComplete?.(actualIndex, true);
         velocityRef.current = 0;
+        
+        // 可选：在动画结束后调整位置，避免虚拟偏移量过大
+        // 这样可以防止数字溢出
+        if (Math.abs(virtualOffset) > Math.abs(middleOffset) * 1.5) {
+          const adjustment = Math.round(virtualOffset / (items.length * ITEM_HEIGHT)) * (items.length * ITEM_HEIGHT);
+          setVirtualOffset(virtualOffset - adjustment);
+        }
       },
     });
   };
 
   const startInertia = (initialVelocity: number) => {
     if (Math.abs(initialVelocity) < VELOCITY_THRESHOLD) {
-      snapToClosest(translateY);
+      snapToClosest(virtualOffset);
       return;
     }
 
     let currentVelocity = initialVelocity;
-    let currentY = translateY;
+    let currentOffset = virtualOffset;
 
     const inertiaAnimation = () => {
       currentVelocity *= FRICTION;
-      currentY = constrainY(currentY + currentVelocity);
-      setTranslateY(currentY);
+      currentOffset = constrainVirtualOffset(currentOffset + currentVelocity);
+      setVirtualOffset(currentOffset);
       velocityRef.current = currentVelocity;
-
-      const currentIndex = getClosestIndex(currentY);
-      if (currentIndex !== selectedIndex) {
-        setSelectedIndex(currentIndex);
-      }
 
       if (Math.abs(currentVelocity) > VELOCITY_THRESHOLD) {
         animationFrameRef.current = requestAnimationFrame(inertiaAnimation);
       } else {
-        snapToClosest(currentY, currentVelocity);
+        snapToClosest(currentOffset, currentVelocity);
       }
     };
 
@@ -103,10 +142,17 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
   };
 
   const handleDragStart = () => {
-    isDraggingRef.current = true;
+    setIsDragging(true);
     if (animationRef.current) {
       animationRef.current.stop();
     }
+
+    // 修改这里：安全地取消动画帧
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
@@ -115,18 +161,13 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
   };
 
   const handleDrag = (_: any, info: PanInfo) => {
-    const newY = constrainY(translateY + info.delta.y * DAMPING_RATIO);
-    setTranslateY(newY);
+    const newOffset = constrainVirtualOffset(virtualOffset + info.delta.y * DAMPING_RATIO);
+    setVirtualOffset(newOffset);
     velocityRef.current = info.velocity.y * DAMPING_RATIO;
-
-    const currentIndex = getClosestIndex(newY);
-    if (currentIndex !== selectedIndex) {
-      setSelectedIndex(currentIndex);
-    }
   };
 
   const handleDragEnd = (_: any, info: PanInfo) => {
-    isDraggingRef.current = false;
+    setIsDragging(false);
     const finalVelocity = info.velocity.y * DAMPING_RATIO * 0.1;
     startInertia(finalVelocity);
   };
@@ -134,61 +175,57 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    
-    // 添加更强的节流，防止一次滚动触发多次
+
     const now = Date.now();
-    if (now - lastWheelTimeRef.current < 300) {
+    if (now - lastWheelTimeRef.current < 50) {
       return;
     }
-    
-    if (isDraggingRef.current || isSnapping) {
+
+    if (isDragging || isSnapping) {
       return;
     }
-    
+
     lastWheelTimeRef.current = now;
 
     const delta = e.deltaY > 0 ? 1 : -1;
-    const targetIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + delta));
-    
-    if (targetIndex === selectedIndex) return;
-    
-    const targetY = -targetIndex * ITEM_HEIGHT;
+    const targetVirtualIndex = getClosestVirtualIndex(virtualOffset) + delta;
+    const targetOffset = -targetVirtualIndex * ITEM_HEIGHT;
 
     setIsSnapping(true);
-    onSnapComplete?.(targetIndex, false);
+    const actualIndex = ((targetVirtualIndex % items.length) + items.length) % items.length;
+    onSnapComplete?.(actualIndex, false);
 
     if (animationRef.current) {
       animationRef.current.stop();
     }
 
-    animationRef.current = animate(translateY, targetY, {
+    animationRef.current = animate(virtualOffset, targetOffset, {
       type: 'spring',
       stiffness: 300,
       damping: 30,
       onUpdate: (v) => {
-        setTranslateY(v);
+        setVirtualOffset(v);
       },
       onComplete: () => {
-        setSelectedIndex(targetIndex);
         setIsSnapping(false);
-        onSnapComplete?.(targetIndex, true);
+        onSnapComplete?.(actualIndex, true);
       },
     });
   };
 
   // 计算每个项的样式
-  const getItemStyle = (index: number) => {
-    const itemY = index * ITEM_HEIGHT;
-    const distanceFromCenter = Math.abs(centerOffset - (itemY + translateY));
-    
+  const getItemStyle = (position: number) => {
+    const centerPosition = -virtualOffset;
+    const distanceFromCenter = Math.abs(centerPosition - position);
+
     let scale = 1.2;
     let opacity = 1;
-    
+
     if (distanceFromCenter > 0) {
       scale = Math.max(0.8, 1.2 - (distanceFromCenter / ITEM_HEIGHT) * 0.2);
       opacity = Math.max(0.4, 1 - (distanceFromCenter / ITEM_HEIGHT) * 0.3);
     }
-    
+
     return { scale, opacity };
   };
 
@@ -202,7 +239,7 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
       <div
         className="absolute left-0 right-0 pointer-events-none z-10"
         style={{
-          top: centerOffset,
+          top: ITEM_HEIGHT * Math.floor(VISIBLE_ITEMS / 2),
           height: ITEM_HEIGHT,
         }}
       >
@@ -226,34 +263,39 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
         onDragStart={handleDragStart}
         onDrag={handleDrag}
         onDragEnd={handleDragEnd}
-        style={{ 
-          transform: `translateY(${translateY}px)`,
+        style={{
+          transform: `translateY(${virtualOffset}px)`,
           willChange: 'transform',
         }}
-        className="relative cursor-grab active:cursor-grabbing pt-[120px]"
+        className="relative cursor-grab active:cursor-grabbing"
       >
-        {items.map((item, index) => {
-          const { scale, opacity } = getItemStyle(index);
+        {visibleItems.map((item) => {
+          const { scale, opacity } = getItemStyle(item.position);
+          const isSelected = ((Math.round(-virtualOffset / ITEM_HEIGHT) % items.length) + items.length) % items.length === item.actualIndex;
 
           return (
             <div
-              key={index}
+              key={`${item.virtualIndex}-${item.actualIndex}`}
               style={{
                 height: ITEM_HEIGHT,
-                transform: `scale(${scale})`,
+                transform: `translateY(${item.position}px) scale(${scale})`,
                 opacity,
                 willChange: 'transform, opacity',
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
               }}
               className="flex items-center justify-center text-2xl transition-none"
             >
               <span
                 className={`${
-                  index === selectedIndex
+                  isSelected
                     ? 'font-bold text-blue-600'
                     : 'font-normal text-gray-700'
                 }`}
               >
-                {item}
+                {item.label}
               </span>
             </div>
           );
