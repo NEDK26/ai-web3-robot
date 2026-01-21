@@ -23,6 +23,8 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
   const animationRef = useRef<any>(null);
   const lastWheelTimeRef = useRef(0);
 
+  const CENTER_OFFSET = Math.floor(VISIBLE_ITEMS / 2) * ITEM_HEIGHT;
+
   // 计算总虚拟项目数
   const totalVirtualItems = items.length * VIRTUAL_ITEMS_MULTIPLIER;
   
@@ -32,11 +34,13 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
     return -middleVirtualIndex * ITEM_HEIGHT;
   }, [totalVirtualItems]);
 
-  // 初始化位置
+// 初始化位置：确保 defaultIndex 位于中间
   useEffect(() => {
-    const initialVirtualIndex = Math.floor(totalVirtualItems / 2) + defaultIndex;
+    // 将虚拟列表的起点设在总长度的中间，以便双向滚动
+    const middleIteration = Math.floor(VIRTUAL_ITEMS_MULTIPLIER / 2);
+    const initialVirtualIndex = (middleIteration * items.length) + defaultIndex;
     setVirtualOffset(-initialVirtualIndex * ITEM_HEIGHT);
-  }, [defaultIndex, totalVirtualItems]);
+  }, [defaultIndex, items.length]); 
 
   // 计算当前实际索引（通过取模实现循环）
   const selectedIndex = useMemo(() => {
@@ -45,9 +49,15 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
     return ((virtualIndex % items.length) + items.length) % items.length;
   }, [virtualOffset, items.length]);
 
-  // 生成虚拟项目列表（只渲染可见部分）
+  // 可见部分
   const visibleItems = useMemo(() => {
-  const startVirtualIndex = Math.floor(-virtualOffset / ITEM_HEIGHT) - Math.floor(VISIBLE_ITEMS / 2);
+  // 计算当前在“中心”的那个虚拟索引
+  const centerVirtualIndex = Math.round(-virtualOffset / ITEM_HEIGHT);
+  
+  // 渲染中心点上下各 4 个，确保滚动时不会看到空白
+  const startVirtualIndex = centerVirtualIndex - 4;
+  const endVirtualIndex = centerVirtualIndex + 4;
+
   const itemsToShow: Array<{
     virtualIndex: number;
     actualIndex: number;
@@ -55,17 +65,15 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
     position: number;
   }> = [];
 
-  for (let i = 0; i < VISIBLE_ITEMS * 3; i++) {
-    const virtualIndex = startVirtualIndex + i;
-    const actualIndex = ((virtualIndex % items.length) + items.length) % items.length;
+  for (let i = startVirtualIndex; i <= endVirtualIndex; i++) {
+    const actualIndex = ((i % items.length) + items.length) % items.length;
     itemsToShow.push({
-      virtualIndex,
+      virtualIndex: i,
       actualIndex,
       label: items[actualIndex],
-      position: virtualIndex * ITEM_HEIGHT,
+      position: i * ITEM_HEIGHT,
     });
   }
-
   return itemsToShow;
 }, [virtualOffset, items]);
 
@@ -215,19 +223,20 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
 
   // 计算每个项的样式
   const getItemStyle = (position: number) => {
-    const centerPosition = -virtualOffset;
-    const distanceFromCenter = Math.abs(centerPosition - position);
+  // position 是项的绝对位置，-virtualOffset 是当前选中的目标绝对位置
+  const distanceFromCenter = Math.abs(position + virtualOffset);
 
-    let scale = 1.2;
-    let opacity = 1;
+  let scale = 1.2;
+  let opacity = 1;
 
-    if (distanceFromCenter > 0) {
-      scale = Math.max(0.8, 1.2 - (distanceFromCenter / ITEM_HEIGHT) * 0.2);
-      opacity = Math.max(0.4, 1 - (distanceFromCenter / ITEM_HEIGHT) * 0.3);
-    }
+  // 这里的 ITEM_HEIGHT 是 60，距离越远，缩放和透明度越小
+  if (distanceFromCenter > 0) {
+    scale = Math.max(0.8, 1.2 - (distanceFromCenter / (ITEM_HEIGHT * 2)) * 0.4);
+    opacity = Math.max(0.3, 1 - (distanceFromCenter / (ITEM_HEIGHT * 2)) * 0.7);
+  }
 
-    return { scale, opacity };
-  };
+  return { scale, opacity };
+};
 
   return (
     <div
@@ -264,7 +273,7 @@ export function WheelPicker({ items, defaultIndex = 0, onSnapComplete }: WheelPi
         onDrag={handleDrag}
         onDragEnd={handleDragEnd}
         style={{
-          transform: `translateY(${virtualOffset}px)`,
+          transform: `translateY(${virtualOffset + CENTER_OFFSET}px)`,
           willChange: 'transform',
         }}
         className="relative cursor-grab active:cursor-grabbing"
